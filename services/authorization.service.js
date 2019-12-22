@@ -4,6 +4,7 @@
 /* eslint-disable object-curly-newline */
 /* eslint-disable camelcase */
 const jwt = require('jsonwebtoken');
+const tokenGenerator = require('rand-token');
 const moment = require('moment');
 const fs = require('fs-extra');
 const path = require('path');
@@ -13,8 +14,10 @@ const AuthorizationUtils = require('../utils/authorization.utils');
  * Сервис авторизации
  */
 class AuthorizationService {
-  constructor({ DatabaseRepository }) {
-    this.pool = DatabaseRepository.pool;
+  constructor(sequelize) {
+    this.RefreshTokenModel = sequelize.models.refresh_token;
+    this.UserModel = sequelize.models.user;
+    this.sequelize = sequelize;
   }
 
   /**
@@ -28,27 +31,24 @@ class AuthorizationService {
   async signUp({ username, password, image }) {
     if (!username || !password) throw 'Отсутствуют необходимые данные или были переданы пустые поля';
     if (!/([/|.|\w|\s|-])*\.(?:jpg|gif|png)/.test(image.name)) throw 'Некорректное расширение файла';
-    const client = await this.pool.connect();
-    try {
-      await client.query('begin');
+    await this.sequelize.transaction(async (transaction) => {
       const imageName = `${username}_logo${path.extname(image.name)}`;
       const imagePath = path.join(__dirname, '../images', imageName);
-
-      await client.query('insert into users(username, password, image) values($1,$2,$3)',
-        [username, AuthorizationUtils.encrypt(password), `/images/${imageName}`]);
+      await this.UserModel.create({
+        username,
+        password: AuthorizationUtils.encrypt(password),
+        image: `/images/${imageName}`,
+      });
       await new Promise((resolve, reject) => {
         fs.createReadStream(image.path)
           .pipe(fs.createWriteStream(imagePath))
           .on('error', (err) => {
-            client.query('rollback').then(() => reject(err));
+            transaction.rollback();
+            reject(err);
           })
           .on('finish', () => resolve());
       });
-      await client.query('commit');
-    } catch (err) {
-      await client.query('rollback');
-      throw err;
-    }
+    });
     return { message: 'OK' };
   }
 
@@ -60,24 +60,18 @@ class AuthorizationService {
    */
   async login({ username, password }) {
     if (!username || !password) throw 'Отсутствуют необходимые данные или были переданы пустые поля';
-    const [user] = (await this.pool.query(
-      'select * from users where username=$1', [username],
-    )).rows;
+    const user = await this.UserModel.findOne({ where: { username } });
     if (!user) throw { message: 'Пользователь не найден', statusCode: 404 };
     if (password !== AuthorizationUtils.decrypt(user.password)) throw { message: 'Неверный пароль' };
     const token = jwt.sign({ user_id: user.id }, process.env.SECRET_KEY, { expiresIn: 18000 });
-    const [result] = (await this.pool.query(`insert into refresh_tokens (user_id, expiration_time)
-                          values ($1, $2)
-                          on conflict (user_id)
-                          do update set refresh_token = default, expiration_time=excluded.expiration_time
-                          returning *;
-    `, [user.id, moment().add(8, 'hours').toDate()])).rows;
+    const refresh_token = tokenGenerator.uid(128);
+    await this.RefreshTokenModel.upsert({ user_id: user.id, refresh_token, expiration_time: moment().add(8, 'hours') });
     return {
       user_id: user.id,
       username: user.username,
       user_image: user.image,
       token,
-      refresh_token: result.refresh_token,
+      refresh_token,
     };
   }
 
@@ -89,9 +83,7 @@ class AuthorizationService {
    */
   async refreshToken({ user_id, refresh_token }) {
     if (!user_id || !refresh_token) throw 'Отсутствуют необходимые данные или были переданы пустые поля';
-    const [usersRefreshToken] = (await this.pool.query(
-      'select * from refresh_tokens where user_id=$1', [user_id],
-    )).rows;
+    const usersRefreshToken = await this.RefreshTokenModel.findOne({ where: { user_id } });
     if (!usersRefreshToken) throw { statusCode: 404, message: 'Токен отсутствует' };
     if (usersRefreshToken.refresh_token !== refresh_token) throw 'Токены не совпадают';
     if (moment().isAfter(usersRefreshToken.expiration_time)) throw 'Время жизни токена истекло';
@@ -108,9 +100,7 @@ class AuthorizationService {
    */
   async rejectToken({ refresh_token, user_id }) {
     if (!user_id || !refresh_token) throw 'Отсутствуют необходимые данные или были переданы пустые поля';
-    await this.pool.query(
-      'delete from refresh_tokens where user_id=$1 and refresh_token=$2', [user_id, refresh_token],
-    );
+    await this.RefreshTokenModel.destroy({ where: { refresh_token, user_id } });
     return { message: 'OK' };
   }
 }

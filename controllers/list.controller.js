@@ -1,11 +1,10 @@
-/* eslint-disable consistent-return */
 /* eslint-disable no-throw-literal */
 /* eslint-disable camelcase */
 
 const ListService = require('../services/list.service');
-const DatabaseRepository = require('../repositories');
+const DatabaseUtils = require('../utils/db.utils');
 
-const listService = new ListService({ DatabaseRepository });
+const listService = new ListService(DatabaseUtils.sequelize);
 
 
 /** Класс работы с списком и элементами списка */
@@ -62,8 +61,11 @@ class ListController {
    */
   static async getList(req, res) {
     try {
+      const { user_id } = req.headers;
       const { id } = req.query;
-      const result = await listService.getList({ id });
+      const result = await listService.getList({
+        user_id, id,
+      });
       if (!result) throw 'Данные не найдены';
       return res.sendRes(result);
     } catch (err) {
@@ -118,11 +120,11 @@ class ListController {
     try {
       const { user_id } = req.headers;
       const {
-        list_id, amount, name, description,
+        list_id, type, amount, name, description,
       } = req.body;
       const date = req.body.date ? new Date(req.body.date) : new Date();
       const result = await listService.addListItem({
-        user_id, list_id, amount, name, description, date,
+        user_id, list_id, type, amount, name, description, date,
       });
       return res.sendRes(result);
     } catch (err) {
